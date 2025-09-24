@@ -4,23 +4,11 @@ import hashlib
 from datetime import datetime
 import os
 from fpdf import FPDF
-import requests
-import smtplib
-from email.mime.multipart import MIMEMultipart
-from email.mime.application import MIMEApplication
-import schedule
-import time
-import threading
 
-# ====== Config ======
+# ===== Config =====
 DB_FILE = "database.db"
 MEDIA_FOLDER = "media"
 REPORT_FOLDER = "reports"
-
-INSTAGRAM_BUSINESS_ID = "YOUR_IG_BUSINESS_ID"
-ACCESS_TOKEN = "YOUR_LONG_LIVED_TOKEN"
-EMAIL_USER = "youragency@email.com"
-EMAIL_PASS = "YOUR_EMAIL_PASSWORD"
 
 os.makedirs(MEDIA_FOLDER, exist_ok=True)
 os.makedirs(REPORT_FOLDER, exist_ok=True)
@@ -28,7 +16,7 @@ os.makedirs(REPORT_FOLDER, exist_ok=True)
 conn = sqlite3.connect(DB_FILE, check_same_thread=False)
 c = conn.cursor()
 
-# ====== DB Tables ======
+# ===== Database Tables =====
 c.execute('''CREATE TABLE IF NOT EXISTS users (
                 id INTEGER PRIMARY KEY,
                 username TEXT UNIQUE,
@@ -56,7 +44,22 @@ c.execute('''CREATE TABLE IF NOT EXISTS posts (
 
 conn.commit()
 
-# ====== Utils ======
+# ===== Create default admin user =====
+def create_admin():
+    username = "admin"
+    password = "admin"
+    email = "admin@email.com"
+    role = "admin"
+    pw_hash = hashlib.sha256(password.encode()).hexdigest()
+    existing = c.execute("SELECT * FROM users WHERE username=?", (username,)).fetchone()
+    if not existing:
+        c.execute("INSERT INTO users (username,email,password_hash,role) VALUES (?,?,?,?)",
+                  (username,email,pw_hash,role))
+        conn.commit()
+
+create_admin()
+
+# ===== Utils =====
 def hash_password(password):
     return hashlib.sha256(password.encode()).hexdigest()
 
@@ -64,23 +67,6 @@ def check_login(username, password):
     pw_hash = hash_password(password)
     user = c.execute("SELECT * FROM users WHERE username=? AND password_hash=?", (username, pw_hash)).fetchone()
     return user
-
-def send_email(to_email, subject, pdf_path):
-    msg = MIMEMultipart()
-    msg["From"] = EMAIL_USER
-    msg["To"] = to_email
-    msg["Subject"] = subject
-
-    with open(pdf_path, "rb") as f:
-        attach = MIMEApplication(f.read(), _subtype="pdf")
-        attach.add_header("Content-Disposition", "attachment", filename=os.path.basename(pdf_path))
-        msg.attach(attach)
-
-    server = smtplib.SMTP("smtp.gmail.com", 587)
-    server.starttls()
-    server.login(EMAIL_USER, EMAIL_PASS)
-    server.send_message(msg)
-    server.quit()
 
 def generate_pdf_report(client_id, client_name):
     posts = c.execute("SELECT filename, caption, hashtags, scheduled_time, status, feedback FROM posts WHERE client_id=?", (client_id,)).fetchall()
@@ -97,34 +83,7 @@ def generate_pdf_report(client_id, client_name):
     pdf.output(filename)
     return filename
 
-def post_to_instagram(file_path, caption):
-    # Step 1: Upload media
-    url = f"https://graph.facebook.com/v20.0/{INSTAGRAM_BUSINESS_ID}/media"
-    payload = {
-        "image_url": file_path,
-        "caption": caption,
-        "access_token": ACCESS_TOKEN
-    }
-    r = requests.post(url, data=payload)
-    media_id = r.json().get("id")
-    if not media_id:
-        print("Error uploading media:", r.json())
-        return False
-    # Step 2: Publish media
-    publish_url = f"https://graph.facebook.com/v20.0/{INSTAGRAM_BUSINESS_ID}/media_publish"
-    publish_payload = {
-        "creation_id": media_id,
-        "access_token": ACCESS_TOKEN
-    }
-    publish = requests.post(publish_url, data=publish_payload)
-    if publish.status_code == 200:
-        print("Post published:", publish.json())
-        return True
-    else:
-        print("Error publishing:", publish.json())
-        return False
-
-# ====== Login ======
+# ===== Login =====
 if "user" not in st.session_state:
     st.title("Social Media Manager Login")
     username = st.text_input("Username")
@@ -142,9 +101,9 @@ user = st.session_state["user"]
 role = user[4]
 st.sidebar.write(f"Logged in as: {user[1]} ({role})")
 
-# ====== Admin Menu ======
+# ===== Admin Menu =====
 if role == "admin":
-    menu = st.sidebar.selectbox("Menu", ["Dashboard", "Add Client", "Add Post", "Calendar", "Generate Report"])
+    menu = st.sidebar.selectbox("Menu", ["Dashboard", "Add Client", "Add Post", "Generate Report"])
     
     if menu == "Dashboard":
         st.subheader("All Clients & Posts")
@@ -187,13 +146,6 @@ if role == "admin":
                 conn.commit()
                 st.success("Post scheduled!")
 
-    elif menu == "Calendar":
-        st.subheader("Scheduled Posts Calendar")
-        posts = c.execute("""SELECT posts.id, clients.name, filename, caption, hashtags, scheduled_time, status
-                             FROM posts JOIN clients ON posts.client_id=clients.id""").fetchall()
-        for post in posts:
-            st.write(f"**{post[1]}** | {post[3]} | Scheduled: {post[5]} | Status: {post[6]}")
-
     elif menu == "Generate Report":
         st.subheader("Generate PDF Report for Client")
         clients = c.execute("SELECT id,name FROM clients").fetchall()
@@ -203,14 +155,10 @@ if role == "admin":
             client_id = client_dict[client_name]
             pdf_file = generate_pdf_report(client_id, client_name)
             st.success(f"Report saved as {pdf_file}")
-            send_email(c.execute("SELECT email FROM clients WHERE id=?", (client_id,)).fetchone()[0],
-                       f"{client_name} Report", pdf_file)
-            st.info(f"Report emailed to {client_name}")
 
-# ====== Client Menu ======
+# ===== Client Menu =====
 elif role == "client":
     menu = st.sidebar.selectbox("Menu", ["My Posts Approval"])
-
     if menu == "My Posts Approval":
         st.subheader("Posts Pending Approval")
         posts = c.execute("""SELECT posts.id, clients.name, filename, caption, hashtags, scheduled_time, status, feedback
@@ -229,17 +177,3 @@ elif role == "client":
                 c.execute("UPDATE posts SET status='Rejected', feedback=? WHERE id=?", (feedback, post[0]))
                 conn.commit()
                 st.warning("Post rejected!")
-
-# ====== Background Auto-Posting Scheduler ======
-def auto_post_scheduler():
-    while True:
-        posts = c.execute("SELECT id, filename, caption FROM posts WHERE status='Approved'").fetchall()
-        for post in posts:
-            file_path = os.path.join(MEDIA_FOLDER, post[1])
-            success = post_to_instagram(file_path, post[2])
-            if success:
-                c.execute("UPDATE posts SET status='Published' WHERE id=?", (post[0],))
-                conn.commit()
-        time.sleep(3600)  # Check every hour
-
-threading.Thread(target=auto_post_scheduler, daemon=True).start()
